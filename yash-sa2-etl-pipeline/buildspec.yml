@@ -19,5 +19,5 @@ phases:
       - echo Build completed on `date`
 artifacts:
   files:
-     - yash-sa2-etl-pipeline/target/yash-sa2-etl-pipeline-0.0.1-SNAPSHOT.jar
+     - yash-sa2-etl-pipeline/target/yash-sa2-etl-pipeline.jar
   #discard-paths: yes
