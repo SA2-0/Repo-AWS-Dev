@@ -1,0 +1,115 @@
+import boto3
+import time
+from botocore.vendored import requests
+import pandas as pd
+import io
+import websocket
+
+s3=boto3.client('s3')
+sm_client = boto3.client('sagemaker')
+notebook_instance_name = 'bankingsa-aws-sagemaker-notebook'
+raw_bucket="sa_raw_zone"
+published_bucket="sa_published_zone"
+bucket="ptg-banking-poc"
+file="s3://sagemaker-us-east-1-754307369999/TrainData/DatasetEntry.xlsx"
+
+url = sm_client.create_presigned_notebook_instance_url(NotebookInstanceName=notebook_instance_name)['AuthorizedUrl']
+
+def connections():
+    url_tokens = url.split('/')
+    http_proto = url_tokens[0]
+    http_hn = url_tokens[2].split('?')[0].split('#')[0]
+
+    s = requests.Session()
+    r = s.get(url)
+    cookies = "; ".join(key + "=" + value for key, value in s.cookies.items())
+
+    ws = websocket.create_connection(
+        "wss://{}/terminals/websocket/1".format(http_hn),
+        cookie=cookies,
+        host=http_hn,
+        origin=http_proto + "//" + http_hn
+    )
+    return ws
+
+
+def read_file():
+    data = pd.read_excel(file, sheet_name="Sheet1",encoding="ISO-8859-1",error_bad_lines=False)
+    # DatasetPath=data['DatasetPath'].iloc[-1] for testing
+    Model = data['Model'].iloc[-1]
+    Type = data['Type'].iloc[-1]
+    filename = data['filename'].iloc[-1]
+    DatasetPath = data['DatasetPath'].iloc[-1]
+    print (DatasetPath, Model, Type, filename)
+    print('line 36')
+    filename1=DatasetPath.split('/')[-1]
+
+    if filename==filename1:
+        opath=DatasetPath.split(filename1)[0]
+
+    if opath.__contains__(raw_bucket):
+        delim=opath.replace(raw_bucket,published_bucket).split('s3://'+bucket+'/')[1]
+        npath=opath.replace(raw_bucket,published_bucket)
+    else:
+        exit(0)
+    print(delim, npath, opath)
+    print('line 56-hi')
+    kwargs = {'Bucket': bucket}
+    kwargs['Prefix'] = delim
+    kwargs['MaxKeys'] = 1
+
+    response = s3.list_objects_v2(**kwargs)
+    all = response['Contents']
+    latest = max(all, key=lambda x: x['LastModified'])
+    npath=latest['Key']
+    nDatasetPath = "s3://" + bucket+'/'+npath
+    nfilename = npath.split("/")[-1]
+    print(nDatasetPath, nfilename)
+
+    df1 = pd.DataFrame({'DatasetPath': [str(nDatasetPath)]})
+    df2 = pd.DataFrame({'Model': [str(Model)]})
+    df3 = pd.DataFrame({'Type': [str(Type)]})
+    df4 = pd.DataFrame({'filename': [str(nfilename)]})
+
+    print('line 52-hi')
+    
+    with io.BytesIO() as output:
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df1.to_excel(writer, sheet_name='Sheet1', startcol=0, index=False)
+                df2.to_excel(writer, sheet_name='Sheet1', startcol=1, index=False)
+                df3.to_excel(writer, sheet_name='Sheet1', startcol=2, index=False)
+                df4.to_excel(writer, sheet_name='Sheet1', startcol=3, index=False)
+        data = output.getvalue()
+
+    s3R = boto3.resource('s3')
+    s3R.Bucket('sagemaker-us-east-1-754307369999').put_object(Key='TrainData/DatasetEntry.xlsx', Body=data)
+    
+    return Type
+
+
+def main():
+    ws=connections()
+    Type = read_file()
+    print(Type)
+    
+    if Type == 'Training':
+        ws.send(
+            """[ "stdin", "jupyter nbconvert --execute --to notebook --inplace /home/ec2-user/SageMaker/Generic.ipynb --ExecutePreprocessor.kernel_name=python3 --ExecutePreprocessor.timeout=1500\\r" ]""")
+        time.sleep(1)
+        ws.close()
+
+    elif Type == 'Retraining':
+        ws.send(
+            """[ "stdin", "jupyter nbconvert --execute --to notebook --inplace /home/ec2-user/SageMaker/GenericRetraining.ipynb --ExecutePreprocessor.kernel_name=python3 --ExecutePreprocessor.timeout=1500\\r" ]""")
+        time.sleep(1)
+        ws.close()
+
+    elif Type == 'Testing':
+        ws.send(
+            """[ "stdin", "jupyter nbconvert --execute --to notebook --inplace /home/ec2-user/SageMaker/Testing.ipynb --ExecutePreprocessor.kernel_name=python3 --ExecutePreprocessor.timeout=1500\\r" ]""")
+        time.sleep(1)
+        ws.close()
+
+
+if __name__ == '__main__':
+    main()
