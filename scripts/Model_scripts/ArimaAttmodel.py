@@ -1,4 +1,3 @@
-# Importing the libraries
 import numpy as np
 import pandas as pd
 import boto3
@@ -9,7 +8,11 @@ import os
 import argparse
 import pmdarima as pm
 from sklearn.metrics import mean_squared_error
-import io
+import statsmodels.api as sm
+from sklearn.metrics import mean_squared_error
+from pandas import Series
+import pmdarima as pm
+from io import StringIO
 from math import sqrt
 #import currency_converter
 
@@ -42,7 +45,6 @@ if __name__ == '__main__':
     data= pd.read_csv(os.path.join(args.train,args.filename))
     print(data)
     data['OrderReceivedDate'] = pd.to_datetime(data['OrderReceivedDate'])
-    data=data.head(50000)
     #test= pd.read_csv(os.path.join(args.test, args.test_file))
     data_usa=data[data.loc[:,"Country"]=="Usa"]
 
@@ -56,7 +58,19 @@ if __name__ == '__main__':
     data_volume=data_volume[["Volume","OrderReceivedDate"]]
     data_volume=data_volume.sort_values(by='OrderReceivedDate')
     data_volume_train=data_volume.head(-12)
-    print(data_volume_train)
+    data_volume.to_csv("./Volume.csv")
+    #df= df.set_index('OrderReceivedDate')
+    #df['OrderReceivedDate'] = pd.to_datetime(df['OrderReceivedDate'])
+    data_volume = data_volume.set_index('OrderReceivedDate')
+
+    print(data_volume)
+    print(type(data_volume))
+    data_volume.to_csv('./ActualVolume.csv')
+    StringData = StringIO() 
+    data_volume.to_csv(StringData)
+    s3_resource = boto3.resource('s3')
+    s3_resource.Object(bucket_name='sa2-train-bucket',key='Output/ActualVolume.csv').put(Body=StringData.getvalue())
+
     data_volume_test=data_volume.tail(12)
     stepwise_fit = pm.auto_arima(data_volume_train.loc[:,"Volume"], start_p=1, start_q=1,
                              max_p=3, max_q=3, m=12,
@@ -74,14 +88,22 @@ if __name__ == '__main__':
     print(stepwise_fit.predict(n_periods=12))
     preds=stepwise_fit.predict(n_periods=12)
     mse = mean_squared_error(data_volume_test.loc[:,"Volume"],preds)
+    original_test = data_volume_test.loc[:,"Volume"]
+    preds_test=stepwise_fit.predict(n_periods=12)
+    rmse_test = mean_squared_error(original_test,preds_test,squared =False)
+    #mape_test = np.mean(abs(np.array(data_volume_test)-np.array(preds_test))/np.array(data_volume_test))*100 
+    print(rmse_test)
     rmse = sqrt(mse)
     print('RMSE: %f' % rmse)
     from io import StringIO
     lst=[]
     lst2=[]
-    s=str(rmse)
+    #lst3=[]
+    #x=str(mape_test)
+    #lst3.append(x)
+    s=str(rmse_test)
     lst2.append(s)
-    client = boto3.client('sagemaker',region_name='us-east-1')
+    client = boto3.client('sagemaker',region_name='us-east-2')
     response = client.list_training_jobs(
         StatusEquals='InProgress',
         SortBy='Status',
@@ -93,11 +115,67 @@ if __name__ == '__main__':
     StringData = StringIO() 
     df.to_csv(StringData)
     s3_resource = boto3.resource('s3')
-    s3_resource.Object(bucket_name='sa2-train-bucket',key='Accuracy/Accuracy-AremaRetrain.csv').put(Body=StringData.getvalue())
+    s3_resource.Object(bucket_name='sa2-train-bucket',key='Accuracy/Accuracy-Arema.csv').put(Body=StringData.getvalue())
     joblib.dump(stepwise_fit, os.path.join(args.model_dir, "arima.joblib"))
     #y = joblib.load(os.path.join(args.model_dir, "arima.joblib"))
+    #rmse_test = mean_squared_error(original_test,preds_test,squared =False)
+    #mape_test = np.mean(abs(np.array(data_volume_test)-np.array(preds_test))/np.array(data_volume_test))*100 
+
+    periods_train = data_volume_train.shape[0]
+    preds_train = stepwise_fit.predict(n_periods= periods_train)
+    actual_train = data_volume_train.loc[:,"Volume"]
+    rmse_train = mean_squared_error(actual_train,preds_train,squared =False)
+    mape_train = np.mean(abs(np.array(actual_train)-np.array(preds_train))/np.array(actual_train))*100 
+
+    original_test = data_volume_test.loc[:,"Volume"]
+    preds_test=stepwise_fit.predict(n_periods=12)
+    rmse_test = mean_squared_error(original_test,preds_test,squared =False)
+    mape_test = np.mean(abs(np.array(original_test)-np.array(preds_test))/np.array(original_test))*100 
+    time_series_metrics = pd.DataFrame({"rmse_train":[round(rmse_train,2)],"rmse_test":[round(rmse_test,2)],"mape_train":[round(mape_train,2)],"mape_test":[round(mape_test,2)]})
+    time_series_metrics.to_csv("time_series_metrics.csv",index=False)
+    data_volume_train["fitted"] = preds_train
+    data_volume_train.to_csv("time_Series_Actual_fitted.csv",index=False)
+    StringData = StringIO() 
+    time_series_metrics.to_csv(StringData)
+    s3_resource = boto3.resource('s3')
+    s3_resource.Object(bucket_name='sa2-train-bucket',key='Output/time_series_metrics.csv').put(Body=StringData.getvalue())
+    
+    time_series_metrics.to_csv("time_series_metrics.csv",index=False)
+    #print(data_volume_train.loc[:,"OrderReceivedDate"])
+    #print(type(data_volume_train.loc[:,"OrderReceivedDate"]))
+
+    data_volume_train["fitted"] = preds_train
+    print(data_volume_train)
+    StringData = StringIO() 
+    data_volume_train.to_csv(StringData)
+    s3_resource = boto3.resource('s3')
+    s3_resource.Object(bucket_name='sa2-train-bucket',key='Output/time_Series_Actual_fitted.csv').put(Body=StringData.getvalue())
+    decomposition = sm.tsa.seasonal_decompose(data_volume.dropna(), model='additive',freq=12)
+    decomposition.plot()
+    seasonality = decomposition.seasonal ## write these three arrays to csv with corresponding headers
+    trend = decomposition.trend
+    residuals = decomposition.resid
+    print(trend)
+    print(type(trend))
+    StringData = StringIO() 
+    trend.to_csv(StringData)
+    s3_resource = boto3.resource('s3')
+    s3_resource.Object(bucket_name='sa2-train-bucket',key='Output/trend.csv').put(Body=StringData.getvalue())
+    trend.to_csv('./Trend.csv')
+    StringData = StringIO() 
+    seasonality.to_csv(StringData)
+    s3_resource = boto3.resource('s3')
+    s3_resource.Object(bucket_name='sa2-train-bucket',key='Output/seasonality.csv').put(Body=StringData.getvalue())
+    seasonality.to_csv('./seasonality.csv')
+    StringData = StringIO() 
+    residuals.to_csv(StringData)
+    s3_resource = boto3.resource('s3')
+    s3_resource.Object(bucket_name='sa2-train-bucket',key='Output/residuals.csv').put(Body=StringData.getvalue())
+    residuals.to_csv('./residuals.csv')
     #.predict(n_period=5)
     #print(y.predict(n_periods=int(test["month"])))
+
+   
         
 def input_fn(input_data, content_type):
     """Parse input data payload
